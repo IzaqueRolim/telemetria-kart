@@ -1,0 +1,27 @@
+{
+  "name": "kart-telemetry",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/server",
+    "apps/dashboard",
+    "apps/mobile",
+    "tools/*"
+  ],
+  "scripts": {
+    "build:shared": "npm run build -w @kart/shared",
+    "build": "npm run build:shared && npm run build -w @kart/server && npm run build -w @kart/dashboard",
+    "test": "npm run test -w @kart/shared",
+    "db:up": "docker compose up -d db",
+    "db:migrate": "npm run prisma:migrate -w @kart/server -- --name init",
+    "server": "npm run build:shared && npm run start:dev -w @kart/server",
+    "dashboard": "npm run dev -w @kart/dashboard",
+    "mobile": "npm run start -w @kart/mobile",
+    "simulate": "npm run start -w @kart/simulator --",
+    "start": "npm run start:prod -w @kart/server"
+  },
+  "engines": {
+    "node": ">=20.12"
+  }
+}

@@ -1,0 +1,18 @@
+# Render Blueprint: servidor (API + WebSocket) servindo também o dashboard.
+# No painel do Render: New > Blueprint > selecione este repositório.
+services:
+  - type: web
+    name: kart-telemetria
+    runtime: node
+    plan: free            # troque para "starter" para não dormir após 15 min sem uso
+    region: virginia
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL
+        sync: false       # cole a URL do Neon/Supabase no painel
+      - key: DASHBOARD_DIST
+        value: ../dashboard/dist

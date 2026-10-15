@@ -1,0 +1,120 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SessionStatus {
+  LOBBY
+  RUNNING
+  FINISHED
+}
+
+/// Pista (kartódromo). Reutilizada por nome para permitir rankings por pista no futuro.
+model Track {
+  id        String    @id @default(cuid())
+  name      String
+  nameKey   String    @unique
+  /// último traçado registrado (lista de {lat,lng})
+  path      Json?
+  /// última linha de largada usada (StartFinishLine)
+  line      Json?
+  createdAt DateTime  @default(now())
+  sessions  Session[]
+}
+
+/// Sala / sessão de corrida.
+model Session {
+  id          String        @id @default(cuid())
+  code        String        @unique
+  trackId     String
+  track       Track         @relation(fields: [trackId], references: [id])
+  status      SessionStatus @default(LOBBY)
+  hostPilotId String?
+  targetLaps  Int?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  /// StartFinishLine atual (com versão)
+  line        Json?
+  trackPath   Json?
+  /// relatório geral congelado no encerramento
+  report      Json?
+  createdAt   DateTime      @default(now())
+  pilots      Pilot[]
+  points      GpsPoint[]
+  crossings   Crossing[]
+  laps        Lap[]
+
+  @@index([createdAt])
+}
+
+model Pilot {
+  id         String     @id @default(cuid())
+  sessionId  String
+  session    Session    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  name       String
+  number     Int
+  color      String
+  token      String
+  maxSpeedMs Float?
+  joinedAt   DateTime   @default(now())
+  points     GpsPoint[]
+  crossings  Crossing[]
+  laps       Lap[]
+
+  @@unique([sessionId, number])
+}
+
+/// Amostra GPS bruta (relógio do servidor). Base para relatórios, replay e comparação de traçados.
+model GpsPoint {
+  id        BigInt   @id @default(autoincrement())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  pilotId   String
+  pilot     Pilot    @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  seq       Int
+  t         BigInt
+  lat       Float
+  lng       Float
+  speed     Float?
+  heading   Float?
+  accuracy  Float?
+  receivedAt DateTime @default(now())
+
+  @@unique([pilotId, seq])
+  @@index([sessionId, t])
+}
+
+/// Passagem válida pela linha (index 0 = largada).
+model Crossing {
+  id            String  @id @default(cuid())
+  sessionId     String
+  session       Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  pilotId       String
+  pilot         Pilot   @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  index         Int
+  t             BigInt
+  uncertaintyMs Int
+
+  @@unique([pilotId, index])
+  @@index([sessionId])
+}
+
+model Lap {
+  id            String  @id @default(cuid())
+  sessionId     String
+  session       Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  pilotId       String
+  pilot         Pilot   @relation(fields: [pilotId], references: [id], onDelete: Cascade)
+  number        Int
+  startT        BigInt
+  endT          BigInt
+  timeMs        Int
+  uncertaintyMs Int
+
+  @@unique([pilotId, number])
+  @@index([sessionId])
+}

@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "Kart Telemetria",
+    "slug": "kart-telemetria",
+    "version": "1.0.0",
+    "orientation": "default",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "br.ufam.kart.telemetria"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#05080d",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "package": "br.ufam.kart.telemetria",
+      "permissions": [
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro",
+      "output": "single"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "O Kart Telemetria usa o GPS para cronometrar suas voltas e mostrar sua posição na pista.",
+          "isAndroidForegroundServiceEnabled": false
+        }
+      ]
+    ],
+    "scheme": "kart",
+    "backgroundColor": "#05080d",
+    "experiments": {
+      "typedRoutes": false
+    },
+    "extra": {
+      "serverUrl": "",
+      "router": {},
+      "eas": {
+        "projectId": "e9bbc664-351b-4662-8960-f737ca27d957"
+      }
+    },
+    "owner": "izaquerolim"
+  }
+}

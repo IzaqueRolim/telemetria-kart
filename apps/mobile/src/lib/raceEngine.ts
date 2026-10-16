@@ -64,7 +64,7 @@ export interface RaceState {
   error: string | null;
 }
 
-const FLUSH_MS = 1000;
+const FLUSH_MS = 500;
 const BATCH = 300;
 const PERSIST_MS = 3000;
 const RESYNC_MS = 30000;

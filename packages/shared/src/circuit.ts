@@ -1,25 +1,22 @@
 /**
- * Circuito sintético (≈ 900 m) usado pelos testes e pelo simulador de karts.
- * Não é usado em produção.
+ * Circuito sintético usado pelos testes e pelo simulador de karts. Não é usado em produção.
+ *
+ * Traçado de kartódromo montado em estacionamento de shopping (≈ 785 m, cabe em
+ * 180 × 105 m): reta dos boxes, cotovelo à direita, sequência de grampos de
+ * raio ≈ 6 m no fundo e um "zigue-zague" no miolo — os trechos paralelos ficam a
+ * ≥ 17 m um do outro, mais que o erro típico do GPS de celular.
+ * Eixos em metros: x = leste, y = norte; a largada está em (0,0) rumo leste.
  */
 import { LatLng, XY, fromXY } from './geo';
 
-const WAYPOINTS: XY[] = [
-  { x: 0, y: 0 },
-  { x: 120, y: 0 },
-  { x: 200, y: 5 },
-  { x: 240, y: 35 },
-  { x: 235, y: 80 },
-  { x: 190, y: 105 },
-  { x: 140, y: 90 },
-  { x: 110, y: 60 },
-  { x: 70, y: 70 },
-  { x: 40, y: 110 },
-  { x: -10, y: 115 },
-  { x: -50, y: 90 },
-  { x: -60, y: 45 },
-  { x: -40, y: 10 },
+const RAW: [number, number][] = [
+  [45, 100], [110, 100], [150, 100], [175, 92], [185, 70], [185, 30], [180, 8], [166, -2], [152, 5],
+  [148, 25], [135, 36], [122, 25], [120, 7], [106, -3], [92, 6], [90, 30], [77, 41], [64, 30], [60, 12],
+  [45, 0], [25, 5], [10, 25], [12, 45], [30, 56], [70, 58], [96, 61], [107, 65], [110, 71], [106, 78],
+  [96, 81], [60, 81], [24, 80], [13, 84], [10, 92], [16, 99], [28, 101],
 ];
+// desloca para a largada (meio da reta dos boxes) ficar na origem
+const WAYPOINTS: XY[] = RAW.map(([x, y]) => ({ x: x - 45, y: y - 100 }));
 
 function catmullRom(p0: XY, p1: XY, p2: XY, p3: XY, t: number): XY {
   const t2 = t * t;
@@ -78,11 +75,14 @@ export function buildCircuit(origin: LatLng, subdivisions = 12): Circuit {
       const a = pathXY[i];
       const b = pathXY[i + 1];
       const xy = { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
-      const h0 = headingAt(i);
-      const h1 = headingAt(Math.min(i + 1, pathXY.length - 2));
-      let dh = Math.abs(h1 - h0);
+      const n = pathXY.length - 1;
+      const i0 = (i - 2 + n) % n;
+      const i1 = (i + 2) % n;
+      let dh = Math.abs(headingAt(i1) - headingAt(i0));
       if (dh > 180) dh = 360 - dh;
-      return { xy, latLng: fromXY(origin, xy), heading: h0, curvature: dh / seg };
+      const span = ((cumulative[i1] - cumulative[i0] + length) % length) || seg;
+      // curvatura em graus por metro (raio ≈ 57,3 / curvatura)
+      return { xy, latLng: fromXY(origin, xy), heading: headingAt(i), curvature: dh / span };
     },
   };
 }

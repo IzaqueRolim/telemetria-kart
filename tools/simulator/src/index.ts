@@ -11,9 +11,14 @@
  *   --duration S      encerra a corrida após S segundos (só quando o simulador é o criador; 0 = nunca)
  *   --offline         um dos karts perde a internet por ~12 s no meio da corrida
  *   --pair            o 2º kart anda colado no 1º (teste de "dois celulares lado a lado")
+ *   --battle          o 2º kart anda ~3 m atrás do 1º, no mesmo ritmo (teste de disputa de posição)
  *   --noise M         deriva do GPS simulado em metros (padrão 3)
  *   --track NOME      nome da pista (padrão "Kartódromo Simulado")
- *   --origin lat,lng  centro do circuito sintético
+ *   --origin lat,lng  ponto da linha de largada (padrão: estacionamento do Shopping Aricanduva, SP)
+ *
+ * O circuito é um kartódromo de estacionamento (≈ 785 m) cheio de grampos; os
+ * karts freiam antes das curvas (≈ 1,1 g lateral) e aceleram na saída, como um
+ * kart de aluguel (máx. ≈ 60 km/h).
  */
 import { io, Socket } from 'socket.io-client';
 import {
@@ -45,7 +50,7 @@ const NOISE = Number(opt('noise', '3')); // deriva do GPS em metros
 const DURATION = Number(opt('duration', '0'));
 const JOIN = opt('join')?.toUpperCase();
 const TRACK = opt('track', 'Kartódromo Simulado')!;
-const [oLat, oLng] = (opt('origin', '-23.7015,-46.6975') as string).split(',').map(Number);
+const [oLat, oLng] = (opt('origin', '-23.5661,-46.5042') as string).split(',').map(Number);
 
 const NAMES = ['Gabriel', 'Lucas', 'Marina', 'Beatriz', 'Rafael', 'Júlia', 'Pedro', 'Camila', 'Thiago', 'Larissa', 'Bruno', 'Sofia'];
 
@@ -72,6 +77,24 @@ function emitAck<T>(s: Socket, ev: string, payload: unknown, timeout = 5000): Pr
   return s.timeout(timeout).emitWithAck(ev, payload) as Promise<T>;
 }
 
+// dinâmica de kart de aluguel
+const LAT_ACC = 11; // m/s² de aceleração lateral nas curvas
+const BRAKE = 7; // m/s² de frenagem
+const ACCEL = 2.6; // m/s² de aceleração
+
+/** velocidade máxima possível a `d` metros, respeitando as curvas à frente */
+function speedLimit(d: number, top: number): number {
+  let v = top;
+  for (let s = 0; s <= 40; s += 2) {
+    const k = positionAt(d + s).curvature; // graus/m
+    if (k < 0.05) continue;
+    const r = 57.3 / k;
+    const vCorner = Math.sqrt(LAT_ACC * r);
+    v = Math.min(v, Math.sqrt(vCorner * vCorner + 2 * BRAKE * s));
+  }
+  return v;
+}
+
 let seed = 1234;
 const rnd = () => {
   seed = (seed * 1664525 + 1013904223) % 4294967296;
@@ -85,6 +108,7 @@ class SimKart {
   seq = 0;
   d: number;
   pace: number;
+  v = 0;
   /** relógio do "celular" errado em até ±60 s (como celulares reais); o GPS tem a hora certa */
   skewMs = Math.round((rnd() - 0.5) * 120_000);
   fixTime = new FixTimeMapper();
@@ -98,7 +122,7 @@ class SimKart {
 
   constructor(public join: JoinResult, gridIndex: number) {
     this.d = gridIndex === 0 ? 0 : -6 * gridIndex; // fila indiana atrás da linha
-    this.pace = 20 + rnd() * 2.5; // m/s na reta
+    this.pace = 15.5 + rnd() * 1.5; // m/s de velocidade final (56–61 km/h)
     this.session = join.session;
   }
 
@@ -130,10 +154,10 @@ class SimKart {
   /** avança a física; dt em segundos */
   step(dt: number) {
     if (this.session.status !== 'RUNNING') return;
-    const { curvature } = positionAt(this.d);
-    const slow = Math.min(0.4, curvature * 0.15);
-    const v = this.pace * (1 - slow) * (0.97 + rnd() * 0.06);
-    this.d += v * dt;
+    const target = speedLimit(this.d, this.pace) * (0.98 + rnd() * 0.04);
+    if (this.v < target) this.v = Math.min(target, this.v + ACCEL * dt);
+    else this.v = Math.max(target, this.v - BRAKE * dt);
+    this.d += this.v * dt;
   }
 
   sample() {
@@ -149,8 +173,7 @@ class SimKart {
     // o fix vem com a hora do GPS; o app converte para o relógio do celular e depois para o do servidor
     const gpsT = Date.now();
     const localT = this.fixTime.map(gpsT, this.sysNow() + 40 + Math.round(rnd() * 120));
-    const { curvature } = p;
-    const v = this.pace * (1 - Math.min(0.4, curvature * 0.15));
+    const v = this.v;
     this.queue.push({
       seq: this.seq++,
       t: this.clock.toServer(localT),
@@ -203,6 +226,15 @@ async function main() {
       karts.push(new SimKart(j, i));
     }
   }
+  if (flag('battle') && karts.length > 1) {
+    // disputa: o 2º kart cola 3 m atrás do 1º (ultrapassagem não deve "piscar")
+    karts[1].step = function (dt: number) {
+      if (this.session.status !== 'RUNNING') return;
+      this.v = karts[0].v;
+      this.d = karts[0].d - 3;
+      void dt;
+    };
+  }
   if (flag('pair') && karts.length > 1) {
     // dois "celulares" lado a lado no mesmo kart: o gap entre eles deve ser ~0
     karts[1].pace = karts[0].pace;
@@ -239,9 +271,13 @@ async function main() {
   let offlineDone = false;
   const PHYS_DT = 0.05;
 
+  let lastStep = Date.now();
   const timer = setInterval(async () => {
     const now = Date.now();
-    for (const k of karts) k.step(PHYS_DT);
+    // usa o tempo real decorrido (o setInterval atrasa, principalmente no Windows)
+    const dt = Math.min(0.2, (now - lastStep) / 1000);
+    lastStep = now;
+    for (const k of karts) k.step(dt);
     if (now - lastSample >= 1000 / HZ) {
       lastSample = now;
       for (const k of karts) k.sample();

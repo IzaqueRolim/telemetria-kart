@@ -47,6 +47,7 @@ O dashboard tem três fundos, escolhidos no canto do mapa: **Satélite** (Esri),
 npm run simulate -- --karts 6 --duration 180 --offline   # cria uma sala e corre sozinho
 npm run simulate -- --join ABC123 --karts 3              # adiciona karts a uma sala do celular
 npm run simulate -- --karts 3 --pair --duration 180      # 2 "celulares" no mesmo kart, com relógios errados
+npm run simulate -- --karts 4 --battle --duration 240    # 2º kart colado 3 m atrás do 1º (disputa de posição)
 ```
 
 `--offline` derruba a internet de um kart por 12 s para mostrar a sincronização e o aviso "posição desatualizada".

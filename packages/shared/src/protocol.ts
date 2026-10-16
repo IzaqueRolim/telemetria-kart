@@ -60,6 +60,11 @@ export interface LivePosition {
   distanceAheadM: number | null;
   /** fração aproximada da volta atual [0,1] */
   lapProgress: number | null;
+  /**
+   * Últimos pontos filtrados [t, lat, lng] (≈ 4 s). O mapa usa para animar o kart
+   * de forma contínua entre as amostras, em vez de "teleportar" a cada lote.
+   */
+  recent?: [number, number, number][];
 }
 
 export interface LapEvent {
@@ -108,9 +113,16 @@ export interface CreateSessionBody {
   trackName: string;
   pilotName: string;
   targetLaps?: number | null;
+  /**
+   * Identificador gerado pelo app para esta tentativa. Reenvios com o mesmo id
+   * (timeout, servidor acordando) devolvem a MESMA sala em vez de criar outra.
+   */
+  requestId?: string;
 }
 export interface JoinSessionBody {
   pilotName: string;
+  /** idem: evita piloto duplicado quando o app reenvia o pedido */
+  requestId?: string;
 }
 export interface JoinResult {
   session: SessionSnapshot;

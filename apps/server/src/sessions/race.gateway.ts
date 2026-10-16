@@ -130,9 +130,9 @@ export class RaceGateway implements OnGatewayInit, OnGatewayDisconnect, OnModule
       const { rt, pilotId } = await this.pilotContext(socket);
       const before = rt.trackPath;
       const res = await this.sessions.ingest(rt, pilotId, body?.points ?? []);
-      if (res.lineChanged || before !== rt.trackPath) {
-        this.broadcastState(rt);
-      } else if (res.events.length) {
+      if (res.lineChanged || before !== rt.trackPath) this.broadcastState(rt);
+      // eventos de volta saem mesmo quando o lote também gerou o traçado (1ª volta da corrida)
+      if (!res.lineChanged && res.events.length) {
         for (const ev of res.events) {
           if (!ev.lap) continue;
           const p = rt.pilots.get(pilotId)!;

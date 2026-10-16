@@ -23,7 +23,7 @@ export class SessionsController {
 
   @Post('sessions/:code/join')
   join(@Param('code') code: string, @Body() body: JoinSessionBody) {
-    return this.sessions.join(code, body?.pilotName);
+    return this.sessions.join(code, body?.pilotName, body?.requestId);
   }
 
   @Get('sessions/:code')

@@ -1,5 +1,5 @@
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, View } from 'react-native';
 import { Btn, Card, ErrorText, Field, H1, Icon, Label, Screen } from '../components/ui';
 import { api } from '../lib/api';
@@ -15,6 +15,8 @@ export default function Home() {
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState<'create' | 'join' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [waitMsg, setWaitMsg] = useState<string | null>(null);
+  const inFlight = useRef(false);
   const [active, setActive] = useState<ActiveSession | null>(null);
   const [server, setServer] = useState('');
   const [showServer, setShowServer] = useState(false);
@@ -24,29 +26,35 @@ export default function Home() {
       storage.lastName().then((n) => n && setName((cur) => cur || n));
       storage.active().then(setActive);
       storage.serverUrl().then(setServer);
+      api.wake();
     }, []),
   );
 
   const enter = async (kind: 'create' | 'join') => {
+    // trava síncrona: dois toques no mesmo quadro não podem criar duas salas
+    if (inFlight.current) return;
     setError(null);
     const pilotName = name.trim();
     if (!pilotName) return setError('Informe seu nome ou apelido.');
     if (kind === 'create' && !track.trim()) return setError('Informe o nome da pista.');
     if (kind === 'join' && code.trim().length < 4) return setError('Digite o código da sala.');
+    inFlight.current = true;
     setBusy(kind);
     try {
       await leaveSession();
       const r =
         kind === 'create'
-          ? await api.create({ trackName: track.trim(), pilotName, targetLaps: laps ? Number(laps) : null })
-          : await api.join(code.trim(), pilotName);
+          ? await api.create({ trackName: track.trim(), pilotName, targetLaps: laps ? Number(laps) : null }, setWaitMsg)
+          : await api.join(code.trim(), pilotName, setWaitMsg);
       await storage.setLastName(pilotName);
       await storage.setActive({ code: r.session.code, pilot: r.pilot, token: r.token, trackName: r.session.trackName });
       router.push(r.session.status === 'RUNNING' ? '/race' : '/lobby');
     } catch (e) {
       setError((e as Error).message);
     } finally {
+      inFlight.current = false;
       setBusy(null);
+      setWaitMsg(null);
     }
   };
 
@@ -112,6 +120,7 @@ export default function Home() {
             <Btn title="Entrar" variant="ghost" icon="login" loading={busy === 'join'} disabled={!!busy} onPress={() => enter('join')} />
           </Card>
 
+          {waitMsg && <Text style={{ color: c.amber, fontWeight: '700', textAlign: 'center' }}>{waitMsg}</Text>}
           <ErrorText>{error}</ErrorText>
 
           <View style={{ flexDirection: 'row', gap: 10 }}>

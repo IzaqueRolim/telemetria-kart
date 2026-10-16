@@ -89,21 +89,118 @@ function gapBetween(ahead: PilotTiming, behind: PilotTiming, L: number | null): 
   if (L && ahead.progress && behind.progress && behind.crossings.length && ahead.crossings.length) {
     const g = liveGap(ahead.progress, behind.progress, L);
     if (g) return g;
+    // lado a lado (a ordem ainda não trocou porque a ultrapassagem não se confirmou)
+    if (behind.progress.D >= ahead.progress.D) return { ms: 0, laps: 0 };
   }
   return raceGap(ahead.crossings, behind.crossings);
 }
 
-function compareLive(a: PilotTiming, b: PilotTiming): number {
-  const sa = a.crossings.length > 0;
-  const sb = b.crossings.length > 0;
-  if (sa && sb && a.progress && b.progress) {
-    const la = lapCount(a.crossings);
-    const lb = lapCount(b.crossings);
-    // voltas confirmadas na linha mandam; dentro da mesma volta, quem andou mais
-    if (la !== lb) return lb - la;
-    if (Math.abs(a.progress.D - b.progress.D) > 0.5) return b.progress.D - a.progress.D;
+/** Pilotos sem pontos há mais que isso não seguram o instante de comparação. */
+const FRESH_MS = 4000;
+
+const live = (p: PilotTiming) => p.crossings.length > 0 && !!p.progress;
+
+/**
+ * Distância de cada piloto no MESMO instante: o mais recente entre todos os
+ * pilotos com dados frescos já disponíveis (o menor "último t"). Cada celular
+ * envia em momentos diferentes; comparar o último ponto de cada um daria a
+ * vantagem a quem sincronizou por último.
+ */
+function alignedDistances(pilots: PilotTiming[]): { T: number; D: Map<string, number> } {
+  const withP = pilots.filter(live);
+  let newest = -Infinity;
+  for (const p of withP) newest = Math.max(newest, p.progress!.t);
+  let T = Infinity;
+  for (const p of withP) if (newest - p.progress!.t <= FRESH_MS) T = Math.min(T, p.progress!.t);
+  if (!Number.isFinite(T)) T = newest;
+  const D = new Map<string, number>();
+  for (const p of withP) D.set(p.pilotId, p.progress!.distanceAt(T) ?? p.progress!.D);
+  return { T, D };
+}
+
+function compareLiveWith(D: Map<string, number>) {
+  return (a: PilotTiming, b: PilotTiming): number => {
+    const da = D.get(a.pilotId);
+    const db = D.get(b.pilotId);
+    // D já inclui as voltas (voltas × L + distância na volta) e é contínuo na
+    // linha: não depende de a passagem já ter sido detectada para os dois
+    if (da != null && db != null && Math.abs(da - db) > 0.5) return db - da;
+    return compare(a, b);
+  };
+}
+
+/** Vantagem mínima (m) para uma ultrapassagem ao vivo começar a contar. */
+export const OVERTAKE_MARGIN_M = 4;
+/** Por quanto tempo a vantagem precisa se manter para trocar a posição. */
+export const OVERTAKE_HOLD_MS = 1500;
+/** Vantagem que troca a posição na hora (sem dúvida de ruído de GPS). */
+export const OVERTAKE_CLEAR_M = 10;
+
+/**
+ * Ordem ao vivo com histerese. O GPS de cada celular deriva ~3 m (a diferença entre dois chega a 4–6 m): sem isto, dois
+ * karts a poucos metros um do outro trocariam de posição a cada atualização.
+ * A posição só muda quando o de trás fica {@link OVERTAKE_MARGIN_M} à frente por
+ * {@link OVERTAKE_HOLD_MS}, ou {@link OVERTAKE_CLEAR_M} à frente de uma vez.
+ * Use uma instância por sessão (guarda a ordem anterior).
+ */
+export class LiveOrder {
+  private order: string[] = [];
+  private since = new Map<string, number>();
+  private clock = -Infinity;
+
+  reset(): void {
+    this.order = [];
+    this.since.clear();
+    this.clock = -Infinity;
   }
-  return compare(a, b);
+
+  sort(pilots: PilotTiming[]): PilotTiming[] {
+    const { T, D } = alignedDistances(pilots);
+    if (Number.isFinite(T)) this.clock = Math.max(this.clock, T);
+    const now = this.clock;
+
+    // parte da ordem anterior; quem é novo entra no fim e sobe pelas regras abaixo
+    const prev = new Map(this.order.map((id, i) => [id, i]));
+    const known = pilots.filter((p) => prev.has(p.pilotId)).sort((a, b) => prev.get(a.pilotId)! - prev.get(b.pilotId)!);
+    const fresh = pilots.filter((p) => !prev.has(p.pilotId)).sort(compareLiveWith(D));
+    const list = [...known, ...fresh];
+
+    const challenged = new Set<string>();
+    const passes = (ahead: PilotTiming, behind: PilotTiming): boolean => {
+      const da = D.get(ahead.pilotId);
+      const db = D.get(behind.pilotId);
+      if (da == null || db == null) return compare(behind, ahead) < 0;
+      const lead = db - da;
+      if (lead > OVERTAKE_CLEAR_M) return true;
+      if (lead <= OVERTAKE_MARGIN_M) return false;
+      const key = `${behind.pilotId}>${ahead.pilotId}`;
+      challenged.add(key);
+      const t0 = this.since.get(key);
+      if (t0 == null) {
+        this.since.set(key, now);
+        return false;
+      }
+      return now - t0 >= OVERTAKE_HOLD_MS;
+    };
+
+    for (let pass = 0; pass < list.length; pass++) {
+      let swapped = false;
+      for (let i = 0; i + 1 < list.length; i++) {
+        if (passes(list[i], list[i + 1])) {
+          const key = `${list[i + 1].pilotId}>${list[i].pilotId}`;
+          this.since.delete(key);
+          challenged.delete(key);
+          [list[i], list[i + 1]] = [list[i + 1], list[i]];
+          swapped = true;
+        }
+      }
+      if (!swapped) break;
+    }
+    // vantagem que não se manteve: zera a contagem
+    for (const k of [...this.since.keys()]) if (!challenged.has(k)) this.since.delete(k);
+    this.order = list.map((p) => p.pilotId);
+    return list;
+  }
 }
 
 function compare(a: PilotTiming, b: PilotTiming): number {
@@ -124,9 +221,14 @@ function compare(a: PilotTiming, b: PilotTiming): number {
  * @param lapLengthM comprimento da volta de referência. Quando informado e os
  *   pilotos têm `progress`, a ordem e os gaps são contínuos (ao vivo). Sem ele,
  *   tudo é medido nas passagens pela linha (usado no resultado oficial).
+ * @param order estado da ordem ao vivo (histerese contra o ruído do GPS)
  */
-export function computeStandings(pilots: PilotTiming[], lapLengthM: number | null = null): StandingRow[] {
-  const sorted = [...pilots].sort(lapLengthM ? compareLive : compare);
+export function computeStandings(pilots: PilotTiming[], lapLengthM: number | null = null, order?: LiveOrder): StandingRow[] {
+  const sorted = !lapLengthM
+    ? [...pilots].sort(compare)
+    : order
+      ? order.sort(pilots)
+      : [...pilots].sort(compareLiveWith(alignedDistances(pilots).D));
   const leader = sorted[0];
   return sorted.map((p, i) => {
     const c = p.crossings;

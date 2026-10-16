@@ -5,6 +5,7 @@ import {
   haversine,
   LapDetector,
   LatLng,
+  LiveOrder,
   LivePosition,
   PilotInfo,
   physicalDistances,
@@ -60,6 +61,17 @@ export class PilotRuntime {
   }
 }
 
+const TRAIL_MS = 4000;
+
+function recentTrail(filtered: GpsSample[], lastT: number): [number, number, number][] {
+  const out: [number, number, number][] = [];
+  for (let i = filtered.length - 1; i >= 0 && lastT - filtered[i].t <= TRAIL_MS && out.length < 40; i--) {
+    const f = filtered[i];
+    out.push([f.t, Math.round(f.lat * 1e7) / 1e7, Math.round(f.lng * 1e7) / 1e7]);
+  }
+  return out.reverse();
+}
+
 export interface IngestResult {
   lastSeq: number;
   accepted: GpsSample[];
@@ -79,6 +91,8 @@ export class RaceRuntime {
   trackPath: LatLng[] | null = null;
   trackLengthM: number | null = null;
   trackRef: TrackReference | null = null;
+  /** ordem ao vivo com histerese (não troca de posição por ruído do GPS) */
+  private readonly liveOrder = new LiveOrder();
 
   constructor(
     public readonly sessionId: string,
@@ -224,6 +238,7 @@ export class RaceRuntime {
         progress: this.trackRef && p.progress.ready ? p.progress : null,
       })),
       this.trackRef?.length ?? null,
+      this.liveOrder,
     );
   }
 
@@ -251,6 +266,7 @@ export class RaceRuntime {
         stale: this.status === 'RUNNING' && ageMs > STALE_AFTER_MS,
         ageMs,
         distanceAheadM: dist[p.info.id] != null ? Math.round(dist[p.info.id] as number) : null,
+        recent: recentTrail(p.filtered, last.t),
         lapProgress:
           this.trackRef && p.progress.ready
             ? Math.max(0, Math.min(1, (p.progress.D - (p.detector.crossings.length - 1) * this.trackRef.length) / this.trackRef.length))

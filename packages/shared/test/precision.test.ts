@@ -6,6 +6,7 @@ import {
   FixTimeMapper,
   GpsKalman,
   LapDetector,
+  LiveOrder,
   ProgressTracker,
   smoothTrack,
   toXY,
@@ -140,5 +141,66 @@ describe('gap e ordem ao vivo', () => {
     );
     expect(A.det.laps.length).toBe(B.det.laps.length);
     expect(rows[0].pilotId).toBe('B');
+  });
+});
+
+describe('ordem ao vivo com karts colados', () => {
+  const ref = new TrackReference(circuit.path, line);
+
+  /** Simula o servidor: cada celular entrega lotes a cada ~1 s, em instantes diferentes. */
+  function race(gapM: number, speedMs: number, seeds: [number, number], useOrder: boolean) {
+    const offset = (gapM / speedMs) * 1000;
+    const a = driveNoisy({ laps: 4, speedMs, hz: 1, seed: seeds[0] }).samples;
+    const b = driveNoisy({ laps: 4, speedMs, hz: 1, seed: seeds[1], timeOffsetMs: offset }).samples;
+    const mk = (samples: typeof a, phaseMs: number) => ({ samples, i: 0, phaseMs, det: new LapDetector(line), prog: new ProgressTracker() });
+    const karts = { A: mk(a, 130), B: mk(b, 710) };
+    const order = useOrder ? new LiveOrder() : undefined;
+    const leaders: string[] = [];
+    const t0 = 1_000_000 + circuit.length / speedMs * 1000 + 5000; // a partir da 2ª volta
+    const tEnd = 1_000_000 + 3.8 * (circuit.length / speedMs) * 1000;
+    for (let now = 1_000_000; now <= tEnd; now += 500) {
+      for (const k of Object.values(karts)) {
+        // o lote só chega no "segundo" deste celular
+        const delivered = Math.floor((now - k.phaseMs) / 1000) * 1000 + k.phaseMs;
+        while (k.i < k.samples.length && k.samples[k.i].t <= delivered - 200) {
+          const before = k.det.stats.accepted;
+          k.det.push(k.samples[k.i++]);
+          if (k.det.stats.accepted > before && k.det.hasStarted) {
+            k.prog.update(ref, k.det.lastSample!, k.det.crossings.length - 1, k.det.lastCrossingT!);
+          }
+        }
+      }
+      if (now < t0) continue;
+      const rows = computeStandings(
+        Object.entries(karts).map(([id, k], n) => ({
+          pilotId: id,
+          name: id,
+          number: n + 1,
+          color: '',
+          crossings: k.det.crossings.map((c) => c.t),
+          progress: k.prog.ready ? k.prog : null,
+        })),
+        ref.length,
+        order,
+      );
+      leaders.push(rows[0].pilotId);
+    }
+    const changes = leaders.filter((l, i) => i > 0 && l !== leaders[i - 1]).length;
+    const aShare = leaders.filter((l) => l === 'A').length / leaders.length;
+    return { changes, aShare };
+  }
+
+  it('não fica alternando P1/P2 com o de trás a poucos metros', () => {
+    for (const seeds of [[51, 52], [61, 62], [71, 72], [81, 82]] as [number, number][]) {
+      const r = race(8, 14, seeds, true);
+      expect(r.changes).toBeLessThanOrEqual(2);
+      expect(r.aShare).toBeGreaterThan(0.85);
+    }
+  });
+
+  it('compara os karts no mesmo instante, mesmo com lotes chegando em tempos diferentes', () => {
+    // sem histerese, mas com alinhamento no tempo: 15 m atrás nunca vira P1
+    const r = race(15, 14, [91, 92], false);
+    expect(r.aShare).toBe(1);
   });
 });

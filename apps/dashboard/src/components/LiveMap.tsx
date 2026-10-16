@@ -4,15 +4,104 @@ import 'leaflet/dist/leaflet.css';
 import { LatLng, lineEndpoints, LivePosition, PilotInfo, StandingRow, StartFinishLine } from '@kart/shared';
 import type { Theme } from '../lib/theme';
 import { createTileLayer, MAP_STYLES, MapStyle, savedMapStyle, saveMapStyle } from '../lib/tiles';
-const ANIM_MS = 520;
 const TRAIL_MAX = 160;
+/** quanto do histórico de pontos de cada kart fica na memória (ms) */
+const BUFFER_MS = 15_000;
+/** limites do atraso de reprodução (ms) */
+const DELAY_MIN = 400;
+const DELAY_MAX = 4000;
+/** extrapola no máximo isto além do último ponto antes de parar o kart (ms) */
+const EXTRAPOLATE_MS = 400;
+
+interface Sample {
+  t: number;
+  lat: number;
+  lng: number;
+}
 
 interface MarkerState {
   marker: L.Marker;
-  from: L.LatLng;
-  to: L.LatLng;
-  start: number;
+  /** pontos recebidos, em ordem de t (relógio do servidor) */
+  buf: Sample[];
+  stale: boolean;
   trail: L.LatLng[];
+}
+
+/**
+ * Reprodução com atraso ("entity interpolation", como em jogos online): os
+ * pontos chegam em lotes a cada ~0,5–1 s, então o mapa mostra cada kart um pouco
+ * no passado e anda continuamente entre as amostras. O atraso se ajusta ao maior
+ * atraso de chegada visto nos últimos segundos e é o mesmo para todos os karts,
+ * para que a distância entre eles no mapa seja a real.
+ */
+class Playback {
+  /** amostras de (relógio do servidor − Date.now()) para estimar o relógio do servidor */
+  private offsets: { at: number; v: number }[] = [];
+  private lags: { at: number; v: number }[] = [];
+  private delay = 1500;
+  private lastFrame = 0;
+  offset = 0;
+
+  observe(serverTime: number, lagMs: number[]) {
+    const at = Date.now();
+    this.offsets.push({ at, v: serverTime - at });
+    this.offsets = this.offsets.filter((o) => at - o.at < 30_000);
+    // maior offset = mensagem que chegou mais rápido (menos atraso de rede)
+    this.offset = Math.max(...this.offsets.map((o) => o.v));
+    for (const v of lagMs) this.lags.push({ at, v });
+    this.lags = this.lags.filter((o) => at - o.at < 10_000);
+  }
+
+  /** instante (relógio do servidor) a desenhar neste quadro */
+  renderTime(): number {
+    const now = Date.now();
+    const dt = this.lastFrame ? Math.min(100, now - this.lastFrame) : 0;
+    this.lastFrame = now;
+    const target = this.lags.length
+      ? Math.max(DELAY_MIN, Math.min(DELAY_MAX, Math.max(...this.lags.map((o) => o.v)) + 150))
+      : this.delay;
+    // muda o atraso devagar (no máx. 15% da velocidade) para o movimento não dar trancos
+    const step = 0.15 * dt;
+    this.delay += Math.max(-step, Math.min(step, target - this.delay));
+    return now + this.offset - this.delay;
+  }
+}
+
+function catmull(p0: number, p1: number, p2: number, p3: number, u: number): number {
+  const u2 = u * u;
+  const u3 = u2 * u;
+  return 0.5 * (2 * p1 + (-p0 + p2) * u + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u2 + (-p0 + 3 * p1 - 3 * p2 + p3) * u3);
+}
+
+/** posição do kart no instante t: curva suave pelos pontos (segue a curva da pista melhor que uma reta) */
+function sampleAt(buf: Sample[], t: number, hold: boolean): [number, number] | null {
+  const n = buf.length;
+  if (!n) return null;
+  const last = buf[n - 1];
+  if (t >= last.t || n === 1) {
+    if (hold || n === 1) return [last.lat, last.lng];
+    const prev = buf[n - 2];
+    const span = last.t - prev.t;
+    if (span <= 0 || span > 3000) return [last.lat, last.lng];
+    const k = Math.min(t - last.t, EXTRAPOLATE_MS) / span;
+    return [last.lat + (last.lat - prev.lat) * k, last.lng + (last.lng - prev.lng) * k];
+  }
+  if (t <= buf[0].t) return [buf[0].lat, buf[0].lng];
+  let lo = 0;
+  let hi = n - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (buf[mid].t <= t) lo = mid;
+    else hi = mid;
+  }
+  const a = buf[lo];
+  const b = buf[hi];
+  const u = (t - a.t) / (b.t - a.t || 1);
+  // buraco grande (sinal perdido): vai em linha reta, a curva poderia "inventar" trajetória
+  if (b.t - a.t > 3000) return [a.lat + (b.lat - a.lat) * u, a.lng + (b.lng - a.lng) * u];
+  const p0 = buf[Math.max(0, lo - 1)];
+  const p3 = buf[Math.min(n - 1, hi + 1)];
+  return [catmull(p0.lat, a.lat, b.lat, p3.lat, u), catmull(p0.lng, a.lng, b.lng, p3.lng, u)];
 }
 
 interface Props {
@@ -40,6 +129,7 @@ export function LiveMap({ theme, trackPath, line, pilots, positions, standings, 
   const markers = useRef(new Map<string, MarkerState>());
   const fitted = useRef<'none' | 'karts' | 'track'>('none');
   const raf = useRef<number>(0);
+  const playback = useRef(new Playback());
   const [style, setStyle] = useState<MapStyle>(savedMapStyle);
 
   // inicialização
@@ -54,12 +144,10 @@ export function LiveMap({ theme, trackPath, line, pilots, positions, standings, 
     map.current = m;
 
     const loop = () => {
-      const now = performance.now();
+      const t = playback.current.renderTime();
       for (const s of markers.current.values()) {
-        const k = Math.min(1, (now - s.start) / ANIM_MS);
-        if (k < 1 || !s.marker.getLatLng().equals(s.to)) {
-          s.marker.setLatLng([s.from.lat + (s.to.lat - s.from.lat) * k, s.from.lng + (s.to.lng - s.from.lng) * k]);
-        }
+        const p = sampleAt(s.buf, t, s.stale);
+        if (p) s.marker.setLatLng(p);
       }
       raf.current = requestAnimationFrame(loop);
     };
@@ -128,10 +216,12 @@ export function LiveMap({ theme, trackPath, line, pilots, positions, standings, 
   useEffect(() => {
     const m = map.current;
     if (!m) return;
-    const now = performance.now();
     const leader = standings[0]?.started ? standings[0].pilotId : null;
     const posOf = new Map(standings.map((r) => [r.pilotId, r.position]));
     const seen = new Set<string>();
+    let serverTime = -Infinity;
+    const lags: number[] = [];
+    for (const pos of Object.values(positions)) serverTime = Math.max(serverTime, pos.t + pos.ageMs);
 
     for (const p of pilots) {
       const pos = positions[p.id];
@@ -147,15 +237,22 @@ export function LiveMap({ theme, trackPath, line, pilots, positions, standings, 
         });
         const marker = L.marker(target, { icon, keyboard: false }).addTo(m);
         marker.on('click', () => onSelect?.(p.id));
-        s = { marker, from: target, to: target, start: now, trail: [] };
+        s = { marker, buf: [], stale: pos.stale, trail: [] };
         markers.current.set(p.id, s);
-      } else if (!s.to.equals(target)) {
-        s.from = s.marker.getLatLng();
-        s.to = target;
-        s.start = now;
       }
-      s.trail.push(target);
-      if (s.trail.length > TRAIL_MAX) s.trail.shift();
+      // junta os pontos novos ao histórico do kart
+      const incoming: Sample[] = pos.recent?.length ? pos.recent.map(([t, lat, lng]) => ({ t, lat, lng })) : [{ t: pos.t, lat: pos.lat, lng: pos.lng }];
+      const lastT = s.buf.length ? s.buf[s.buf.length - 1].t : -Infinity;
+      const added = incoming.filter((x) => x.t > lastT);
+      if (added.length) {
+        s.buf.push(...added);
+        const cut = s.buf[s.buf.length - 1].t - BUFFER_MS;
+        while (s.buf.length > 2 && s.buf[0].t < cut) s.buf.shift();
+        s.trail.push(target);
+        if (s.trail.length > TRAIL_MAX) s.trail.shift();
+      }
+      s.stale = pos.stale;
+      if (!pos.stale) lags.push(pos.ageMs);
 
       const node = s.marker.getElement()?.querySelector('.kart-marker') as HTMLElement | null;
       if (node) {
@@ -186,8 +283,15 @@ export function LiveMap({ theme, trackPath, line, pilots, positions, standings, 
         }
       }
     }
+    if (Number.isFinite(serverTime)) playback.current.observe(serverTime, lags);
+
     if (fitted.current === 'none' && seen.size) {
-      const b = L.latLngBounds([...markers.current.values()].map((s) => s.to));
+      const b = L.latLngBounds(
+        [...markers.current.values()].filter((s) => s.buf.length).map((s) => {
+          const l = s.buf[s.buf.length - 1];
+          return L.latLng(l.lat, l.lng);
+        }),
+      );
       m.fitBounds(b.pad(1.5), { maxZoom: 18 });
       fitted.current = 'karts';
     }

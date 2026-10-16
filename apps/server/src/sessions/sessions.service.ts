@@ -23,6 +23,10 @@ import { IngestResult, RaceRuntime } from './race-runtime';
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const MAX_PILOTS = 30;
+/** por quanto tempo um requestId repetido devolve o mesmo resultado */
+const IDEMPOTENCY_TTL_MS = 10 * 60_000;
+/** salas que nunca largaram somem da lista depois disso */
+const ABANDONED_LOBBY_MS = 3 * 60 * 60_000;
 
 function newCode(len = 6): string {
   const bytes = randomBytes(len);
@@ -45,6 +49,12 @@ export class SessionsService {
   private readonly loading = new Map<string, Promise<RaceRuntime>>();
   /** fila por sessão para serializar escritas de voltas (evita corrida entre lotes) */
   private readonly writeQueue = new Map<string, Promise<unknown>>();
+  /**
+   * Pedidos de criar/entrar já recebidos, por requestId. Com o servidor dormindo
+   * (Render free), o 1º pedido acorda o servidor e cria a sala, mas o app já
+   * desistiu por timeout e reenvia — sem isto, nasciam duas salas.
+   */
+  private readonly idempotent = new Map<string, { at: number; result: Promise<JoinResult> }>();
 
   constructor(private readonly db: PrismaService) {}
 
@@ -54,7 +64,29 @@ export class SessionsService {
 
   // ---------------------------------------------------------------- salas
 
-  async create(body: CreateSessionBody): Promise<JoinResult> {
+  /** Executa `fn` uma única vez por requestId; reenvios recebem o mesmo resultado. */
+  private once(kind: string, requestId: unknown, fn: () => Promise<JoinResult>): Promise<JoinResult> {
+    if (typeof requestId !== 'string' || requestId.length < 8 || requestId.length > 64) return fn();
+    const now = Date.now();
+    for (const [k, v] of this.idempotent) if (now - v.at > IDEMPOTENCY_TTL_MS) this.idempotent.delete(k);
+    const key = `${kind}:${requestId}`;
+    const hit = this.idempotent.get(key);
+    if (hit) {
+      this.log.log(`Pedido repetido (${key}) — devolvendo o resultado anterior`);
+      return hit.result;
+    }
+    const result = fn();
+    this.idempotent.set(key, { at: now, result });
+    // falhou: libera o id para uma nova tentativa de verdade
+    result.catch(() => this.idempotent.delete(key));
+    return result;
+  }
+
+  create(body: CreateSessionBody): Promise<JoinResult> {
+    return this.once('create', body?.requestId, () => this.doCreate(body));
+  }
+
+  private async doCreate(body: CreateSessionBody): Promise<JoinResult> {
     const trackName = cleanName(body?.trackName, 'Nome da pista', 40);
     const pilotName = cleanName(body?.pilotName, 'Nome do piloto');
     const targetLaps =
@@ -95,7 +127,11 @@ export class SessionsService {
     throw new Error('Não foi possível gerar um código de sala');
   }
 
-  async join(code: string, pilotNameRaw: unknown): Promise<JoinResult> {
+  join(code: string, pilotNameRaw: unknown, requestId?: unknown): Promise<JoinResult> {
+    return this.once(`join:${String(code ?? '').toUpperCase()}`, requestId, () => this.doJoin(code, pilotNameRaw));
+  }
+
+  private async doJoin(code: string, pilotNameRaw: unknown): Promise<JoinResult> {
     const pilotName = cleanName(pilotNameRaw, 'Nome do piloto');
     const rt = await this.getRuntime(code);
     if (rt.status === 'FINISHED') throw new BadRequestException('Esta corrida já foi encerrada');
@@ -127,7 +163,10 @@ export class SessionsService {
       take: Math.min(100, limit),
       include: { track: true, _count: { select: { pilots: true } } },
     });
-    return rows.map((r) => ({
+    const now = Date.now();
+    return rows
+      .filter((r) => !(r.status === SessionStatus.LOBBY && now - r.createdAt.getTime() > ABANDONED_LOBBY_MS))
+      .map((r) => ({
       code: r.code,
       trackName: r.track.name,
       status: r.status,

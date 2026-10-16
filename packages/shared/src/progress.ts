@@ -95,6 +95,12 @@ export interface LiveProgress {
   t: number;
   /** instante em que este piloto passou pela distância D (interpolado) */
   timeAt(D: number): number | null;
+  /**
+   * Distância percorrida no instante t (interpolada no histórico). Base da ordem
+   * ao vivo: cada celular manda pontos em instantes diferentes, então comparar o
+   * último D de cada um mistura "agora" com "1 s atrás" — a 50 km/h isso são ~14 m.
+   */
+  distanceAt(t: number): number | null;
 }
 
 /** Histórico (D, t) de um piloto — monotônico em D. */
@@ -149,6 +155,24 @@ export class ProgressTracker implements LiveProgress {
       this.D = D;
     }
     this.t = p.t;
+  }
+
+  distanceAt(t: number): number | null {
+    const Ts = this.Ts;
+    const n = Ts.length;
+    if (!n) return null;
+    if (t >= Ts[n - 1]) return this.Ds[n - 1];
+    if (t <= Ts[0]) return this.Ds[0];
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (Ts[mid] <= t) lo = mid;
+      else hi = mid;
+    }
+    if (Ts[hi] === Ts[lo]) return this.Ds[lo];
+    const f = (t - Ts[lo]) / (Ts[hi] - Ts[lo]);
+    return this.Ds[lo] + f * (this.Ds[hi] - this.Ds[lo]);
   }
 
   timeAt(D: number): number | null {
